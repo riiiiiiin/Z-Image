@@ -1,7 +1,7 @@
 """Z-Image Pipeline."""
 
 import inspect
-from typing import List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from loguru import logger
 import torch
@@ -63,6 +63,20 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
+def _decode_latents_to_pil(vae, latents: torch.Tensor):
+    """Decode latents to a list of PIL Images (batch)."""
+    shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
+    latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
+    image = vae.decode(latents, return_dict=False)[0]
+
+    from PIL import Image
+
+    image = (image / 2 + 0.5).clamp(0, 1)
+    image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+    image = (image * 255).round().astype("uint8")
+    return [Image.fromarray(img) for img in image]
+
+
 @torch.no_grad()
 def generate(
     transformer,
@@ -82,6 +96,15 @@ def generate(
     cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
     max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
     output_type: str = "pil",
+    # ---- experiment / hooks ----
+    initial_latents: Optional[torch.Tensor] = None,
+    noise_sampler: Optional[
+        Callable[[tuple, Optional[torch.Generator], Union[str, torch.device], torch.dtype], torch.Tensor]
+    ] = None,
+    callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    callback_steps: int = 1,
+    callback_decode: bool = False,
+    callback_decode_steps: int = 1,
 ):
     device = next(transformer.parameters()).device
 
@@ -186,7 +209,23 @@ def generate(
     width_latent = 2 * (int(width) // vae_scale)
     shape = (batch_size * num_images_per_prompt, transformer.in_channels, height_latent, width_latent)
 
-    latents = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
+    if callback_steps < 1:
+        raise ValueError(f"callback_steps must be >= 1 (got {callback_steps}).")
+    if callback_decode_steps < 1:
+        raise ValueError(f"callback_decode_steps must be >= 1 (got {callback_decode_steps}).")
+
+    if initial_latents is not None:
+        latents = initial_latents.to(device=device, dtype=torch.float32)
+        if tuple(latents.shape) != tuple(shape):
+            raise ValueError(
+                f"initial_latents shape mismatch: expected {shape}, got {tuple(latents.shape)}. "
+                "(Tip: height/width/vae_scale determine latent spatial size.)"
+            )
+    else:
+        if noise_sampler is None:
+            latents = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
+        else:
+            latents = noise_sampler(shape, generator, device, torch.float32)
 
     actual_batch_size = batch_size * num_images_per_prompt
     image_seq_len = (latents.shape[2] // 2) * (latents.shape[3] // 2)
@@ -275,19 +314,31 @@ def generate(
         latents = scheduler.step(noise_pred.to(torch.float32), t, latents, return_dict=False)[0]
         assert latents.dtype == torch.float32
 
+        if callback is not None and (i % callback_steps == 0 or i == len(timesteps) - 1):
+            payload: Dict[str, Any] = {
+                "stage": "step_end",
+                "step_index": i,
+                "num_inference_steps": num_inference_steps,
+                "t": t,
+                "t_norm": t_norm,
+                "latents": latents,
+                "noise_pred": noise_pred,
+                "height": height,
+                "width": width,
+            }
+            if callback_decode and (i % callback_decode_steps == 0 or i == len(timesteps) - 1):
+                payload["images"] = _decode_latents_to_pil(vae, latents)
+            callback(payload)
+
     if output_type == "latent":
+        if callback is not None:
+            callback({"stage": "final", "latents": latents, "output_type": "latent"})
         return latents
 
-    shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
-    latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
-    image = vae.decode(latents, return_dict=False)[0]
-
     if output_type == "pil":
-        from PIL import Image
+        image = _decode_latents_to_pil(vae, latents)
+        if callback is not None:
+            callback({"stage": "final", "latents": latents, "images": image, "output_type": "pil"})
+        return image
 
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
-        image = (image * 255).round().astype("uint8")
-        image = [Image.fromarray(img) for img in image]
-
-    return image
+    raise ValueError(f"Unsupported output_type: {output_type}")

@@ -12,7 +12,7 @@ from zimage import generate
 
 
 def main():
-    model_path = ensure_model_weights("ckpts/Z-Image-Turbo", verify=False)  # True to verify with md5
+    model_path = ensure_model_weights("/root/autodl-tmp/models/Tongyi-MAI/Z-Image-Turbo", verify=False)  # True to verify with md5
     dtype = torch.bfloat16
     compile = False  # default False for compatibility
     output_path = "example.png"
