@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional, Tuple, Union
 
 import torch
+import numpy as np
+import copy
 
 def _init_latent(
     shape: Tuple[int, ...],
@@ -71,8 +73,8 @@ def sample_noise(
     )
     
     if watermark_args is not None:
-        watermarking_mask = get_watermarking_mask(init_latents_w, watermark_args, device)
-        gt_patch = get_watermarking_pattern(shape, wartermark_args, generator, device, dtype)
+        watermarking_mask = get_watermarking_mask(init_latent, watermark_args, device)
+        gt_patch = get_watermarking_pattern(shape, watermark_args, generator, device, dtype)
         final_latent = inject_watermark(init_latent, watermarking_mask, gt_patch, watermark_args)
 
     return init_latent
@@ -138,7 +140,7 @@ def get_watermarking_mask(init_latents_w, args, device):
     elif args['w_mask_shape'] == 'no':
         pass
     else:
-        raise NotImplementedError(f'w_mask_shape: {args['w_mask_shape']}')
+        raise NotImplementedError(f"w_mask_shape: {args['w_mask_shape']}")
 
     return watermarking_mask
 
@@ -197,7 +199,7 @@ def inject_watermark(init_latents_w, watermarking_mask, gt_patch, args):
         init_latents_w[watermarking_mask] = gt_patch[watermarking_mask].clone()
         return init_latents_w
     else:
-        NotImplementedError(f'w_injection: {args['w_injection']}')
+        NotImplementedError(f"w_injection: {args['w_injection']}")
 
     init_latents_w = torch.fft.ifft2(torch.fft.ifftshift(init_latents_w_fft, dim=(-1, -2))).real
 

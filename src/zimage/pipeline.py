@@ -82,8 +82,9 @@ def _encode_pil_to_latents(vae, images):
     if not isinstance(images, (list, tuple)):
         images = [images]
 
-    device = vae.device
-    dtype = vae.dtype
+    params = next(vae.parameters())
+    device = params.device
+    dtype = params.dtype
 
     image = np.stack([np.array(img) for img in images], axis=0)
     image = torch.from_numpy(image).to(device=device, dtype=dtype)
@@ -164,56 +165,8 @@ def _predict_single_step(t, timesteps, i, num_inference_steps, latents, transfor
     
 
 @torch.no_grad()
-def generate(
-    transformer,
-    vae,
-    text_encoder,
-    tokenizer,
-    scheduler,
-    prompt: Union[str, List[str]],
-    height: int = DEFAULT_HEIGHT,
-    width: int = DEFAULT_WIDTH,
-    num_inference_steps: int = DEFAULT_INFERENCE_STEPS,
-    guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
-    negative_prompt: Optional[Union[str, List[str]]] = None,
-    num_images_per_prompt: int = 1,
-    generator: Optional[torch.Generator] = None,
-    cfg_normalization: bool = False,
-    cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
-    max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
-    output_type: str = "pil",
-    # ---- experiment / hooks ----
-    initial_latents: Optional[torch.Tensor] = None,
-    noise_sampler: Optional[
-        Callable[[tuple, Optional[torch.Generator], Union[str, torch.device], torch.dtype], torch.Tensor]
-    ] = None,
-    callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    callback_steps: int = 1,
-    callback_decode: bool = False,
-    callback_decode_steps: int = 1,
-):
-    device = next(transformer.parameters()).device
-
-    if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
-        vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
-    else:
-        vae_scale_factor = 8
-    vae_scale = vae_scale_factor * 2
-
-    if height % vae_scale != 0:
-        raise ValueError(f"Height must be divisible by {vae_scale} (got {height}).")
-    if width % vae_scale != 0:
-        raise ValueError(f"Width must be divisible by {vae_scale} (got {width}).")
-
-    if isinstance(prompt, str):
-        batch_size = 1
-        prompt = [prompt]
-    else:
-        batch_size = len(prompt)
-
-    do_classifier_free_guidance = guidance_scale > 1.0
-    logger.info(f"Generating image: {height}x{width}, steps={num_inference_steps}, cfg={guidance_scale}")
-
+def _get_text_embeddings(text_encoder, tokenizer, prompt, negative_prompt, max_sequence_length, do_classifier_free_guidance, num_images_per_prompt, device):
+    
     formatted_prompts = []
     for p in prompt:
         messages = [{"role": "user", "content": p}]
@@ -290,7 +243,65 @@ def generate(
             negative_prompt_embeds_list = [
                 npe for npe in negative_prompt_embeds_list for _ in range(num_images_per_prompt)
             ]
+    # print(len(prompt_embeds_list))
+    # if len(prompt_embeds_list) > 0:
+    #     print(prompt_embeds_list[0].shape)
+    return prompt_embeds_list, negative_prompt_embeds_list
 
+@torch.no_grad()
+def generate(
+    transformer,
+    vae,
+    text_encoder,
+    tokenizer,
+    scheduler,
+    prompt: Union[str, List[str]],
+    height: int = DEFAULT_HEIGHT,
+    width: int = DEFAULT_WIDTH,
+    num_inference_steps: int = DEFAULT_INFERENCE_STEPS,
+    guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
+    negative_prompt: Optional[Union[str, List[str]]] = None,
+    num_images_per_prompt: int = 1,
+    generator: Optional[torch.Generator] = None,
+    cfg_normalization: bool = False,
+    cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
+    max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
+    output_type: str = "pil",
+    # ---- experiment / hooks ----
+    initial_latents: Optional[torch.Tensor] = None,
+    noise_sampler: Optional[
+        Callable[[tuple, Optional[torch.Generator], Union[str, torch.device], torch.dtype], torch.Tensor]
+    ] = None,
+    callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    callback_steps: int = 1,
+    callback_decode: bool = False,
+    callback_decode_steps: int = 1,
+):
+    device = next(transformer.parameters()).device
+
+    if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
+        vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+    else:
+        vae_scale_factor = 8
+    vae_scale = vae_scale_factor * 2
+
+    if height % vae_scale != 0:
+        raise ValueError(f"Height must be divisible by {vae_scale} (got {height}).")
+    if width % vae_scale != 0:
+        raise ValueError(f"Width must be divisible by {vae_scale} (got {width}).")
+
+    logger.info(f"Generating image: {height}x{width}, steps={num_inference_steps}, cfg={guidance_scale}")
+    
+    if isinstance(prompt, str):
+        batch_size = 1
+        prompt = [prompt]
+    else:
+        batch_size = len(prompt)
+        
+    do_classifier_free_guidance = guidance_scale > 1.0
+    
+    prompt_embeds_list, negative_prompt_embeds_list = _get_text_embeddings(text_encoder, tokenizer, prompt, negative_prompt, max_sequence_length, do_classifier_free_guidance, num_images_per_prompt, device)
+        
     height_latent = 2 * (int(height) // vae_scale)
     width_latent = 2 * (int(width) // vae_scale)
     shape = (batch_size * num_images_per_prompt, transformer.in_channels, height_latent, width_latent)
@@ -379,21 +390,28 @@ def _invert_single_step(
     transformer,
     s_next: torch.Tensor,                # sample after forward step, shape (B,C,H,W)
     timestep: torch.Tensor,              # the same timestep value used during forward (element of scheduler.timesteps)
+    timesteps: torch.Tensor,             # full timesteps tensor (scheduler.timesteps)
+    i: int,                              # index of this timestep in the forward loop (0..num_inference_steps-1)
+    num_inference_steps: int,
     prompt_embeds_list: List,
     negative_prompt_embeds_list: Optional[List] = None,
+    actual_batch_size: int = None,
     guidance_scale: float = 1.0,
+    do_classifier_free_guidance: bool = False,
+    cfg_truncation: Optional[float] = None,
     cfg_normalization: Optional[float] = None,
     num_fixed_point_iters: int = 8,
     tol: Optional[float] = None,
     device: Optional[torch.device] = None,
+    relax_alpha: Optional[float] = None,
 ):
     """
-    Approximate inversion of a single forward step of FlowMatchEulerDiscreteScheduler:
-        forward: s_next = s_prev + dt * model_output(s_prev, t)
-    We solve for s_prev given s_next and timestep t using Picard iterations:
-        s_prev^{n+1} = s_next - dt * model_output(s_prev^{n}, t)
+    Invert a single forward step using Picard iterations, but call _predict_single_step
+    with the same signature/semantics used by `generate`.
 
-    Returns: s_prev_estimate (same shape & dtype as s_next)
+    Returns:
+      s_prev_estimate (same shape & dtype as s_next),
+      last_model_out (the model output from the last iteration, in same form as used in generate)
     """
     device = device or next(transformer.parameters()).device
     s_next = s_next.to(device)
@@ -404,14 +422,12 @@ def _invert_single_step(
     except Exception:
         # fallback: find nearest
         sched = scheduler.timesteps.to(device)
-        # ensure timestep is tensor on same device
         t_val = timestep.to(device) if torch.is_tensor(timestep) else torch.tensor(float(timestep), device=device)
         diffs = torch.abs(sched - t_val)
         sigma_idx = int(torch.argmin(diffs).item())
 
     # get dt consistent with scheduler.step (sigma_next - sigma)
     sigmas = scheduler.sigmas.to(device)
-    # Ensure sigma_idx + 1 exists
     if sigma_idx + 1 >= sigmas.shape[0]:
         raise ValueError("Invalid sigma index for inversion (no sigma_next).")
     sigma = sigmas[sigma_idx]
@@ -421,42 +437,68 @@ def _invert_single_step(
     # initialize estimate for s_prev as s_next (reasonable starting point)
     s_prev = s_next.clone()
 
-    for it in range(num_fixed_point_iters):
-        # compute model_output at current s_prev estimate
-        model_out, _ = _predict_single_step(
-            transformer,
-            s_prev,
+    last_model_out = None
+
+    for iter_idx in range(num_fixed_point_iters):
+        # Call _predict_single_step with the same argument order used by generate
+        # returns noise_pred and t_norm
+        noise_pred, _ = _predict_single_step(
             timestep,
+            timesteps,
+            i,
+            num_inference_steps,
+            s_prev,
+            transformer,
             prompt_embeds_list,
-            negative_prompt_embeds_list,
+            negative_prompt_embeds_list or [],
+            actual_batch_size if actual_batch_size is not None else s_prev.shape[0],
             guidance_scale,
+            do_classifier_free_guidance,
+            cfg_truncation,
             cfg_normalization,
         )
+
+        if noise_pred is None:
+            # If predict step returned None (e.g., last-step skip), break
+            last_model_out = None
+            break
+
         # Picard update: s_prev <- s_next - dt * model_out(s_prev)
-        s_new = s_next - dt * model_out
+        # (Here model_out == noise_pred returned by _predict_single_step,
+        # which is the same "noise_pred" used in generate -> scheduler.step)
+        s_new = s_next - dt * noise_pred
+
+        # optional relaxation (mixing) for stabilization
+        if relax_alpha is not None:
+            # relax_alpha in [0,1]: s_prev = relax_alpha * s_new + (1-relax_alpha) * s_prev
+            s_new = relax_alpha * s_new + (1.0 - relax_alpha) * s_prev
 
         # check tolerance if provided
         if tol is not None:
             diff = torch.max(torch.abs(s_new - s_prev))
             s_prev = s_new
+            last_model_out = noise_pred
             if diff.item() <= tol:
                 break
         else:
             s_prev = s_new
+            last_model_out = noise_pred
 
     # returned dtype: convert to scheduler/model dtype if necessary (keep float32 to be safe)
-    return s_prev.to(s_next.dtype)
+    return s_prev.to(s_next.dtype), last_model_out
 
 @torch.no_grad()
 def invert_images_to_init_latents(
     transformer,
     vae,
+    text_encoder,
+    tokenizer,
     scheduler,
     images,  # accepts list/sequence of PIL images OR a batched image tensor depending on your _encode_pil_to_latents impl
-    prompt_embeds_list: List,
-    negative_prompt_embeds_list: Optional[List] = None,
     guidance_scale: float = 1.0,
     cfg_normalization: Optional[float] = None,
+    cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
+    max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
     num_inference_steps: Optional[int] = None,  # if provided, will call scheduler.set_timesteps(...) to match generation
     num_fixed_point_iters: int = 8,
     relax_alpha: Optional[float] = None,
@@ -475,7 +517,13 @@ def invert_images_to_init_latents(
     Logging: uses callback(payload) similarly to pipeline.generate's callback.
     """
     device = device or next(transformer.parameters()).device
-
+    do_classifier_free_guidance = guidance_scale > 1.0
+    
+    # 0) use empty prompt
+    batch_size = len(images)
+    prompt = [""] * batch_size
+    prompt_embeds_list, negative_prompt_embeds_list = _get_text_embeddings(text_encoder, tokenizer, prompt, None, max_sequence_length, do_classifier_free_guidance, 1, device)
+    
     # 1) (optional) set timesteps on scheduler to match generation config
     if num_inference_steps is not None:
         scheduler.set_timesteps(num_inference_steps, device=device)
@@ -518,14 +566,26 @@ def invert_images_to_init_latents(
             continue
 
         # perform single-step inversion (parallel batch)
+        # prepare values required by _predict_single_step
+        timesteps_tensor = timesteps  # scheduler.timesteps (already a tensor)
+        num_inf_steps = n_steps
+        forward_index = idx  # in forward generation the step index i equals idx
+        actual_batch_size = batch_size * 1  # we encoded with num_images_per_prompt=1 in _get_text_embeddings
+
         s_prev, last_model_out = _invert_single_step(
             scheduler=scheduler,
             transformer=transformer,
             s_next=current_latents,
             timestep=t,
+            timesteps=timesteps_tensor,
+            i=forward_index,
+            num_inference_steps=num_inf_steps,
             prompt_embeds_list=prompt_embeds_list,
             negative_prompt_embeds_list=negative_prompt_embeds_list,
+            actual_batch_size=actual_batch_size,
             guidance_scale=guidance_scale,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            cfg_truncation=cfg_truncation,
             cfg_normalization=cfg_normalization,
             num_fixed_point_iters=num_fixed_point_iters,
             device=device,

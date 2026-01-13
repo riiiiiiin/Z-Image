@@ -7,6 +7,29 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
+@dataclass
+class _DiagonalGaussian:
+    mean: torch.Tensor    # mu
+    logvar: torch.Tensor  # log(sigma^2)
+
+    @property
+    def std(self) -> torch.Tensor:
+        return (0.5 * self.logvar).exp()
+
+    def mode(self) -> torch.Tensor:
+        return self.mean
+
+    def sample(self) -> torch.Tensor:
+        eps = torch.randn_like(self.mean)
+        return self.mean + self.std * eps
+
+    @property
+    def variance(self) -> torch.Tensor:
+        return (self.std ** 2)
+
+@dataclass
+class AutoencoderEncodeOutput:
+    latent_dist: _DiagonalGaussian
 
 @dataclass
 class AutoencoderKLOutput:
@@ -367,3 +390,36 @@ class AutoencoderKL(nn.Module):
             return (dec,)
 
         return AutoencoderKLOutput(sample=dec)
+
+    def encode(self, x: torch.Tensor, return_dict: bool = True) -> AutoencoderEncodeOutput:
+        """
+        Encode input tensor x -> returns an object with `.latent_dist` that
+        supports .mode() and .sample().
+
+        Args:
+            x: tensor shaped (B, C, H, W), expected to be preprocessed as during training (e.g. in [-1, 1]).
+            return_dict: if False, returns a tuple (latent_dist,), else returns AutoencoderEncodeOutput.
+
+        Returns:
+            AutoencoderEncodeOutput(latent_dist=...) by default, or tuple if return_dict=False.
+        """
+        h = self.encoder(x)  # expected shape: (B, 2*latent_channels, H', W')
+
+        # optionally apply quant_conv (typical in implementations)
+        if self.quant_conv is not None:
+            h = self.quant_conv(h)
+
+        # defensive: channels must be divisible by 2
+        c = h.shape[1]
+        if c % 2 != 0:
+            raise ValueError(f"Encoder output channel count ({c}) not divisible by 2 for mu/logvar split.")
+
+        # split into mean and logvar along channel dim
+        mu, logvar = torch.chunk(h, 2, dim=1)
+
+        latent_dist = _DiagonalGaussian(mean=mu, logvar=logvar)
+
+        if not return_dict:
+            return (latent_dist,)
+
+        return AutoencoderEncodeOutput(latent_dist=latent_dist)
