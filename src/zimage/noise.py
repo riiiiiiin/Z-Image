@@ -61,6 +61,8 @@ class NormalNoiseSampler(NoiseSampler):
     def __init__(self, scale: float = 1.0, watermark_args=None):
         super().__init__(watermark_args)
         self.scale = scale
+        self.watermarking_mask = None
+        self.gt_patch = None
     
     def _sampler(self, shape, generator, device, dtype):
         watermarking_mask, gt_patch, init_latent = sample_noise(
@@ -84,6 +86,8 @@ class UniformNoiseSampler(NoiseSampler):
         self.low = low
         self.high = high
         self.scale = scale
+        self.watermarking_mask = None
+        self.gt_patch = None
     
     def _sampler(self, shape, generator, device, dtype):
         watermarking_mask, gt_patch, init_latent = sample_noise(

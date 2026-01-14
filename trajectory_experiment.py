@@ -26,6 +26,7 @@ from utils import AttentionBackend, ensure_model_weights, load_from_local_dir, s
 from zimage import generate, invert_images_to_init_latents
 from zimage.noise import NormalNoiseSampler, UniformNoiseSampler
 from zimage.trajectory import TrajectoryRecorder
+from zimage.watermark import eval_watermark
 
 
 def select_device():
@@ -78,7 +79,7 @@ def parse_args():
                          "If omitted, a default_alpha will be used or broadcast.")
     p.add_argument('--w_pattern', default='rand')
     p.add_argument('--w_mask_shape', default='circle')
-    p.add_argument('--w_radius', default=10, type=int)
+    p.add_argument('--w_radius', default=20, type=int)
     p.add_argument('--w_measurement', default='l1_complex')
     p.add_argument('--w_injection', default='complex')
     p.add_argument('--w_pattern_const', default=0, type=float)
@@ -161,7 +162,7 @@ def main():
 
         start = time.time()
         output = generate(
-            prompt=args.prompt,
+            prompt=[args.prompt],
             **components,
             height=args.height,
             width=args.width,
@@ -210,9 +211,13 @@ def main():
         recorder.set_run_config(elapsed_seconds=elapsed)
         recorder.flush()
         print(f"Saved trajectory to: {path} (elapsed {elapsed:.2f}s)")
+        return output
     
     clean_init_latent = _invert(clean_path + "_invert", clean_image)
     watermark_init_latent = _invert(watermark_path + "_invert", watermarked_image)
-
+    
+    clean_metric, watermark_metric = eval_watermark(clean_init_latent, watermark_init_latent, watermark_sampler.watermarking_mask, watermark_sampler.gt_patch, watermark_args)
+    print(clean_metric, watermark_metric)
+    
 if __name__ == "__main__":
     main()
