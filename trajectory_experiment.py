@@ -69,7 +69,6 @@ def parse_args():
     p.add_argument("--decode-every", type=int, default=1, help="Decode images every N steps")
 
     p.add_argument("--attn-backend", type=str, default=os.environ.get("ZIMAGE_ATTENTION", "_native_flash"))
-    
     # watermark
     p.add_argument('--w_seed', default=999999, type=int)
     p.add_argument('--w_channel', nargs='*', type=int, default=[0],
@@ -200,7 +199,6 @@ def main():
         output = invert_images_to_init_latents(
             **components,
             images = [image], 
-            guidance_scale=args.guidance,
             num_inference_steps=args.steps,
             callback=recorder,
             callback_steps=1,

@@ -249,6 +249,32 @@ def _get_text_embeddings(text_encoder, tokenizer, prompt, negative_prompt, max_s
     return prompt_embeds_list, negative_prompt_embeds_list
 
 @torch.no_grad()
+def verify_single_step_roundtrip(scheduler, transformer, timesteps, i, t, s_prev, s_next, prompt_embeds_list, negative_prompt_embeds_list, actual_batch_size, guidance_scale, do_cfg, cfg_truncation, cfg_normalization, device):
+
+    # invert: try to reconstruct s_prev using your invert_single_step
+    s_prev_rec, last_model_out = _invert_single_step(
+        scheduler=scheduler,
+        transformer=transformer,
+        s_next=s_next.clone(),
+        timestep=t,
+        timesteps=timesteps,
+        i=i,
+        num_inference_steps=len(timesteps),
+        prompt_embeds_list=prompt_embeds_list,
+        negative_prompt_embeds_list=negative_prompt_embeds_list,
+        actual_batch_size=actual_batch_size,
+        guidance_scale=guidance_scale,
+        do_classifier_free_guidance=do_cfg,
+        cfg_truncation=cfg_truncation,
+        cfg_normalization=cfg_normalization,
+        device=device,
+    )
+
+    err = torch.norm(s_prev - s_prev_rec).item()
+    print("roundtrip L2 error:", err)
+    return err
+
+@torch.no_grad()
 def generate(
     transformer,
     vae,
@@ -350,11 +376,31 @@ def generate(
 
     # Denoising loop with progress bar
     for i, t in enumerate(tqdm(timesteps, desc="Denoising", total=len(timesteps))):
-        noise_pred, t_norm = _predict_single_step(t, timesteps, i, num_inference_steps, latents, transformer, prompt_embeds_list, negative_prompt_embeds_list, actual_batch_size, guidance_scale, do_classifier_free_guidance, cfg_truncation, cfg_normalization)
         
+        old_latents = latents.clone()
+        noise_pred, t_norm = _predict_single_step(t, timesteps, i, num_inference_steps, latents, transformer, prompt_embeds_list, negative_prompt_embeds_list, actual_batch_size, guidance_scale, do_classifier_free_guidance, cfg_truncation, cfg_normalization)
+                
         latents = scheduler.step(noise_pred.to(torch.float32), t, latents, return_dict=False)[0]
         assert latents.dtype == torch.float32
-
+        
+        # verify_single_step_roundtrip(
+        #     scheduler,
+        #     transformer,
+        #     timesteps,
+        #     i,
+        #     t,
+        #     old_latents,
+        #     latents,
+        #     prompt_embeds_list,
+        #     negative_prompt_embeds_list,
+        #     actual_batch_size,
+        #     guidance_scale,
+        #     do_classifier_free_guidance,
+        #     cfg_truncation,
+        #     cfg_normalization,
+        #     device
+        # )
+        
         if callback is not None and (i % callback_steps == 0 or i == len(timesteps) - 1):
             payload: Dict[str, Any] = {
                 "stage": "step_end",
@@ -403,7 +449,7 @@ def _invert_single_step(
     num_fixed_point_iters: int = 8,
     tol: Optional[float] = None,
     device: Optional[torch.device] = None,
-    relax_alpha: Optional[float] = None,
+    relax_alpha: Optional[float] = 0.5,
 ):
     """
     Invert a single forward step using Picard iterations, but call _predict_single_step
@@ -495,13 +541,12 @@ def invert_images_to_init_latents(
     tokenizer,
     scheduler,
     images,  # accepts list/sequence of PIL images OR a batched image tensor depending on your _encode_pil_to_latents impl
-    guidance_scale: float = 1.0,
     cfg_normalization: Optional[float] = None,
     cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
     max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
     num_inference_steps: Optional[int] = None,  # if provided, will call scheduler.set_timesteps(...) to match generation
     num_fixed_point_iters: int = 8,
-    relax_alpha: Optional[float] = None,
+    relax_alpha: Optional[float] = 0.5,
     callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     callback_steps: int = 1,
     callback_decode: bool = False,  # not used here, but kept for API parity
@@ -517,6 +562,9 @@ def invert_images_to_init_latents(
     Logging: uses callback(payload) similarly to pipeline.generate's callback.
     """
     device = device or next(transformer.parameters()).device
+    
+    # 1.0 is suitable
+    guidance_scale = 1.0
     do_classifier_free_guidance = guidance_scale > 1.0
     
     # 0) use empty prompt
@@ -545,10 +593,10 @@ def invert_images_to_init_latents(
     from tqdm import tqdm
     # reverse iterate timesteps: from last index down to 0
     # note: pipeline's forward loop iterated timesteps in increasing order (sigmas index increases)
-    for idx in tqdm(range(n_steps - 1, -1, -1), desc="Inversion (reverse steps)", total=n_steps):
+    for idx in tqdm(range(n_steps - 2, -1, -1), desc="Inversion (reverse steps)"):
         t = timesteps[idx].to(device)
 
-        if t == 0 and idx == n_steps - 1:
+        if t == 0 and idx == n_steps - 2:
             # log skip
             if callback is not None and ( (n_steps - 1 - idx) % callback_steps == 0 or idx == 0):
                 payload = {
