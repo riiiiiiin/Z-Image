@@ -47,13 +47,20 @@ class NoiseSampler(ABC):
     
     def __init__(self, watermark_args=None):
         self.watermark_args = watermark_args
+        self.watermarking_mask = None
+        self.gt_patch = None
+        self.init_latent = None
     
     @abstractmethod
     def _sampler(self, shape, generator, device, dtype):
         pass
     
     def __call__(self, shape, generator, device, dtype):
-        return self._sampler(shape, generator, device, dtype)
+        watermarking_mask, gt_patch, init_latent = self._sampler(shape, generator, device, dtype)
+        self.watermarking_mask = watermarking_mask
+        self.gt_patch = gt_patch
+        self.init_latent = init_latent
+        return init_latent
 
 class NormalNoiseSampler(NoiseSampler):
     """Normal distribution noise sampler."""
@@ -61,11 +68,9 @@ class NormalNoiseSampler(NoiseSampler):
     def __init__(self, scale: float = 1.0, watermark_args=None):
         super().__init__(watermark_args)
         self.scale = scale
-        self.watermarking_mask = None
-        self.gt_patch = None
     
     def _sampler(self, shape, generator, device, dtype):
-        watermarking_mask, gt_patch, init_latent = sample_noise(
+        return sample_noise(
             shape, 
             generator, 
             device, 
@@ -74,9 +79,6 @@ class NormalNoiseSampler(NoiseSampler):
             scale=self.scale, 
             watermark_args=self.watermark_args
         )
-        self.watermarking_mask = watermarking_mask
-        self.gt_patch = gt_patch
-        return init_latent
 
 class UniformNoiseSampler(NoiseSampler):
     """Uniform distribution noise sampler."""
@@ -86,11 +88,9 @@ class UniformNoiseSampler(NoiseSampler):
         self.low = low
         self.high = high
         self.scale = scale
-        self.watermarking_mask = None
-        self.gt_patch = None
     
     def _sampler(self, shape, generator, device, dtype):
-        watermarking_mask, gt_patch, init_latent = sample_noise(
+        return sample_noise(
             shape,
             generator,
             device,
@@ -101,7 +101,4 @@ class UniformNoiseSampler(NoiseSampler):
             scale=self.scale,
             watermark_args=self.watermark_args,
         )
-        self.watermarking_mask = watermarking_mask
-        self.gt_patch = gt_patch
-        return init_latent
 
