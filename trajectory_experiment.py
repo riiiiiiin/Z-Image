@@ -19,10 +19,12 @@ import time
 import regex as re
 
 import torch
+import numpy as np
+import random
 
 from utils import AttentionBackend, ensure_model_weights, load_from_local_dir, set_attention_backend
 from zimage import generate, invert_images_to_init_latents
-from zimage.noise import normal_noise_sampler, uniform_noise_sampler
+from zimage.noise import NormalNoiseSampler, UniformNoiseSampler
 from zimage.trajectory import TrajectoryRecorder
 
 
@@ -33,7 +35,14 @@ def select_device():
         return "mps"
     return "cpu"
 
-
+def set_random_seed(seed=0):
+    torch.manual_seed(seed + 0)
+    torch.cuda.manual_seed(seed + 1)
+    torch.cuda.manual_seed_all(seed + 2)
+    np.random.seed(seed + 3)
+    torch.cuda.manual_seed_all(seed + 4)
+    random.seed(seed + 5)
+    
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--prompt", type=str, default="Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.")
@@ -102,18 +111,19 @@ def main():
     AttentionBackend.print_available_backends()
     set_attention_backend(args.attn_backend)
 
+    set_random_seed(args.seed)
     generator = torch.Generator(device).manual_seed(args.seed)
 
     def get_noise_sampler(watermark_args):
         if args.noise == "uniform":
-            noise_sampler = uniform_noise_sampler(
+            noise_sampler = UniformNoiseSampler(
                 low=args.uniform_low,
                 high=args.uniform_high,
                 scale=args.noise_scale,
                 watermark_args=watermark_args,
             )
         else:
-            noise_sampler = normal_noise_sampler(scale=args.noise_scale, watermark_args=watermark_args)
+            noise_sampler = NormalNoiseSampler(scale=args.noise_scale, watermark_args=watermark_args)
 
         return noise_sampler
     
