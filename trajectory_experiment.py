@@ -157,6 +157,7 @@ def main():
             device=str(device),
             dtype=str(args.dtype),
             attn_backend=args.attn_backend,
+            watermark_args=watermark_args,
         )
 
         start = time.time()
